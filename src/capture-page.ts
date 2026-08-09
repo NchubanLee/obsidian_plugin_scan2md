@@ -43,10 +43,14 @@ export function renderCapturePage(opts: {
   #thumbs{min-height:10px}
   .hint{font-size:12px;color:#6b7280;margin-top:6px}
   input[type=file]{display:none}
-  .modal{display:none;position:fixed;left:0;right:0;top:0;bottom:0;background:rgba(0,0,0,.88);z-index:10;padding:16px;overflow-y:auto}
+  .modal{display:none;position:fixed;left:0;right:0;top:0;bottom:0;background:rgba(0,0,0,.88);z-index:10;padding:16px;overflow-y:auto;-webkit-overflow-scrolling:touch}
   .modal.open{display:block}
-  .modal .inner{max-width:680px;margin:0 auto}
-  #editCanvas{max-width:100%;border-radius:8px;background:#000;touch-action:none;display:block}
+  .modal .inner{max-width:680px;margin:0 auto;position:relative}
+  .modal .closeX{position:absolute;top:-6px;right:-4px;z-index:11;background:#1f2937;color:#fff;border:1px solid #3a3f47;border-radius:50%;width:40px;height:40px;padding:0;font-size:20px;line-height:38px;text-align:center}
+  /* 限高是关键：长图/竖图若占满屏幕，canvas 上的 touch-action:none 会让页面无法滚动，
+     按钮被挤出视口后就卡死了；约束显示高度 + 非裁切模式允许纵向滑动，保证始终能到达按钮。
+     画布内部分辨率不变，裁切坐标已按显示比例换算，不受影响。 */
+  #editCanvas{max-width:100%;max-height:52vh;width:auto;height:auto;margin:0 auto;border-radius:8px;background:#000;touch-action:pan-y;display:block}
   .editRow{display:flex;gap:8px;margin-top:10px}
   .editRow button{flex:1;padding:10px;font-size:15px}
   .editRow .ghost{margin-top:0;width:auto}
@@ -79,6 +83,7 @@ export function renderCapturePage(opts: {
 </div>
 <div id="editModal" class="modal">
   <div class="inner">
+    <button id="eClose" class="closeX">×</button>
     <div id="editHint" class="status">调整图片后点「保存」；明暗/对比度即时预览。</div>
     <canvas id="editCanvas"></canvas>
     <div class="sliderRow"><span>明暗</span><input id="eBright" type="range" min="30" max="200" value="100"><span id="eBrightV" class="val">100%</span></div>
@@ -190,6 +195,8 @@ var editIdx = -1;
 var editBase = null;   // 当前编辑基准（canvas，旋转/裁切会替换它）
 var editBright = 100, editContrast = 100;
 var cropMode = false, cropStart = null, cropRect = null;
+// 裁切框拖拽方式：new=新框选；move=整体移动；n/s/e/w/ne/nw/se/sw=拉边/角微调
+var dragMode = null, dragAnchor = null;
 // 老 Safari 的 2d context 不支持 ctx.filter，预览降级、保存时用逐像素算法兜底
 var FILTER_OK = (function(){
   var c = document.createElement("canvas").getContext("2d");
@@ -201,6 +208,7 @@ function initEditor(){
   $("eCrop").onclick = toggleCrop;
   $("eSave").onclick = saveEdit;
   $("eCancel").onclick = closeEdit;
+  $("eClose").onclick = closeEdit;
   $("eBright").oninput = function(){ editBright = parseInt(this.value, 10); $("eBrightV").textContent = editBright + "%"; drawEdit(); };
   $("eContrast").oninput = function(){ editContrast = parseInt(this.value, 10); $("eContrastV").textContent = editContrast + "%"; drawEdit(); };
   var ec = $("editCanvas");
@@ -225,6 +233,7 @@ function openEdit(idx){
     c.getContext("2d").drawImage(img, 0, 0);
     editBase = c;
     drawEdit();
+    $("editModal").scrollTop = 0;
     $("editModal").className = "modal open";
   };
   img.src = queue[idx].dataUrl;
@@ -232,7 +241,8 @@ function openEdit(idx){
 
 function closeEdit(){
   $("editModal").className = "modal";
-  editBase = null; editIdx = -1; cropMode = false; cropRect = null;
+  $("editCanvas").style.touchAction = "pan-y";
+  editBase = null; editIdx = -1; cropMode = false; cropRect = null; dragMode = null;
 }
 
 function drawEdit(){
@@ -254,6 +264,16 @@ function drawEdit(){
     ctx.setLineDash([8, 6]);
     ctx.strokeRect(cropRect.x, cropRect.y, cropRect.w, cropRect.h);
     ctx.setLineDash([]);
+    // 四角手柄，提示可拖拉微调
+    var hs = Math.max(10, Math.round(w / 50));
+    var pts = [
+      [cropRect.x, cropRect.y], [cropRect.x + cropRect.w, cropRect.y],
+      [cropRect.x, cropRect.y + cropRect.h], [cropRect.x + cropRect.w, cropRect.y + cropRect.h]
+    ];
+    ctx.fillStyle = "#22c55e";
+    for (var i = 0; i < pts.length; i++){
+      ctx.fillRect(pts[i][0] - hs / 2, pts[i][1] - hs / 2, hs, hs);
+    }
   }
 }
 
@@ -273,9 +293,10 @@ function rotateEdit(){
 function toggleCrop(){
   if (!editBase) return;
   if (!cropMode){
-    cropMode = true; cropRect = null;
+    cropMode = true; // 保留已有裁切框，进入后可继续拖动/微调
+    $("editCanvas").style.touchAction = "none"; // 裁切拖拽期间禁止页面滚动
     $("eCrop").textContent = "✓ 应用裁切";
-    $("editHint").textContent = "在图片上按住拖动，框选要保留的区域，然后点「✓ 应用裁切」。";
+    $("editHint").textContent = "空白处拖动重新框选；拖框内整体移动；拖四角/边微调大小。完成后点「✓ 应用裁切」。";
     drawEdit();
   } else {
     if (cropRect && cropRect.w > 10 && cropRect.h > 10){
@@ -288,7 +309,8 @@ function toggleCrop(){
       );
       editBase = c;
     }
-    cropMode = false; cropRect = null;
+    cropMode = false; cropRect = null; dragMode = null;
+    $("editCanvas").style.touchAction = "pan-y";
     $("eCrop").textContent = "✂ 裁切";
     $("editHint").textContent = "调整图片后点「保存」；明暗/对比度即时预览。";
     drawEdit();
@@ -306,29 +328,79 @@ function canvasPos(e){
   };
 }
 
+/** 命中检测：手指落在已有裁切框的角/边/内部/外部，决定本次拖拽方式。 */
+function hitCrop(p){
+  if (!cropRect) return null;
+  var cv = $("editCanvas");
+  // 触屏阈值：屏幕上约 28px 换算到画布像素
+  var rect = cv.getBoundingClientRect();
+  var t = 28 * cv.width / rect.width;
+  var x1 = cropRect.x, y1 = cropRect.y;
+  var x2 = x1 + cropRect.w, y2 = y1 + cropRect.h;
+  var nearL = Math.abs(p.x - x1) <= t, nearR = Math.abs(p.x - x2) <= t;
+  var nearT = Math.abs(p.y - y1) <= t, nearB = Math.abs(p.y - y2) <= t;
+  var inX = p.x >= x1 - t && p.x <= x2 + t, inY = p.y >= y1 - t && p.y <= y2 + t;
+  if (nearL && nearT) return "nw";
+  if (nearR && nearT) return "ne";
+  if (nearL && nearB) return "sw";
+  if (nearR && nearB) return "se";
+  if (nearL && inY) return "w";
+  if (nearR && inY) return "e";
+  if (nearT && inX) return "n";
+  if (nearB && inX) return "s";
+  if (p.x > x1 && p.x < x2 && p.y > y1 && p.y < y2) return "move";
+  return null;
+}
+
 function cropDown(e){
   if (!cropMode || !editBase) return;
   e.preventDefault();
-  cropStart = canvasPos(e);
-  cropRect = null;
+  var p = canvasPos(e);
+  dragMode = hitCrop(p);
+  if (!dragMode){
+    // 落在框外（或还没有框）：开始新的框选
+    dragMode = "new";
+    cropStart = p;
+    cropRect = null;
+  } else if (dragMode === "move"){
+    dragAnchor = { dx: p.x - cropRect.x, dy: p.y - cropRect.y };
+  } else {
+    // 拉边/角：记录按下时的原始框，以其为基准调整
+    dragAnchor = { x: cropRect.x, y: cropRect.y, w: cropRect.w, h: cropRect.h };
+  }
   try { e.target.setPointerCapture(e.pointerId); } catch (err) {}
 }
 
 function cropMove(e){
-  if (!cropMode || !cropStart) return;
+  if (!cropMode || !dragMode) return;
   e.preventDefault();
   var p = canvasPos(e);
-  cropRect = {
-    x: Math.min(cropStart.x, p.x),
-    y: Math.min(cropStart.y, p.y),
-    w: Math.abs(p.x - cropStart.x),
-    h: Math.abs(p.y - cropStart.y)
-  };
+  if (dragMode === "new"){
+    cropRect = {
+      x: Math.min(cropStart.x, p.x),
+      y: Math.min(cropStart.y, p.y),
+      w: Math.abs(p.x - cropStart.x),
+      h: Math.abs(p.y - cropStart.y)
+    };
+  } else if (dragMode === "move"){
+    var cv = $("editCanvas");
+    cropRect.x = Math.max(0, Math.min(cv.width - cropRect.w, p.x - dragAnchor.dx));
+    cropRect.y = Math.max(0, Math.min(cv.height - cropRect.h, p.y - dragAnchor.dy));
+  } else {
+    var a = dragAnchor;
+    var x1 = a.x, y1 = a.y, x2 = a.x + a.w, y2 = a.y + a.h;
+    if (dragMode.indexOf("w") >= 0) x1 = Math.min(p.x, x2 - 1);
+    if (dragMode.indexOf("e") >= 0) x2 = Math.max(p.x, x1 + 1);
+    if (dragMode.indexOf("n") >= 0) y1 = Math.min(p.y, y2 - 1);
+    if (dragMode.indexOf("s") >= 0) y2 = Math.max(p.y, y1 + 1);
+    cropRect = { x: x1, y: y1, w: x2 - x1, h: y2 - y1 };
+  }
   drawEdit();
 }
 
 function cropUp(){
   cropStart = null;
+  dragMode = null;
 }
 
 function saveEdit(){
