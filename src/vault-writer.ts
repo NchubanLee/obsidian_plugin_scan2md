@@ -39,6 +39,8 @@ export interface SaveInput {
   imageExt: string;
   title?: string;
   createdAt: string; // ISO 时间
+  /** raw 直存模式：忽略 attachImages 设置，强制把图片存进笔记。 */
+  forceAttach?: boolean;
 }
 
 /**
@@ -49,27 +51,89 @@ export async function insertIntoActiveNote(
   app: App,
   markdown: string
 ): Promise<string> {
+  const { view, editor, cursor } = getActiveEditor(app);
+  // 光标之前若已有文字，前面补空行；否则只补一个换行 —— 保证表格/标题等块级元素前后有空行，正确渲染
+  const before = editor.getRange({ line: cursor.line, ch: 0 }, cursor);
+  const prefix = before.trim().length > 0 ? "\n\n" : "\n";
+  const insert = prefix + markdown + "\n";
+  insertAtCursor(editor, cursor, insert);
+  return view.file!.path;
+}
+
+/** 获取当前活动 Markdown 编辑器；没有打开的 Markdown 笔记时抛错。 */
+function getActiveEditor(app: App) {
   const view = app.workspace.getActiveViewOfType(MarkdownView);
   if (!view || !view.file) {
     throw new Error(
       "当前没有打开的 Markdown 笔记。请先在电脑端打开一个笔记、把光标放在要插入的位置，再拍照上传。"
     );
   }
-  const editor = view.editor;
-  const cursor = editor.getCursor();
-  // 光标之前若已有文字，前面补空行；否则只补一个换行 —— 保证表格/标题等块级元素前后有空行，正确渲染
-  const before = editor.getRange({ line: cursor.line, ch: 0 }, cursor);
-  const prefix = before.trim().length > 0 ? "\n\n" : "\n";
-  const insert = prefix + markdown + "\n";
+  return { view, editor: view.editor, cursor: view.editor.getCursor() };
+}
+
+/** 在光标处插入文本，并把光标移到插入内容末尾。 */
+function insertAtCursor(
+  editor: import("obsidian").Editor,
+  cursor: { line: number; ch: number },
+  insert: string
+): void {
   editor.replaceRange(insert, cursor);
-  // 光标移到插入内容末尾
   const nl = (insert.match(/\n/g) || []).length;
   const afterLastNl = insert.slice(insert.lastIndexOf("\n") + 1);
   editor.setCursor({
     line: cursor.line + nl,
     ch: (nl === 0 ? cursor.ch : 0) + afterLastNl.length,
   });
-  return view.file.path;
+}
+
+/** 把图片二进制存进附件文件夹（时间戳命名、防重名），返回可用于 ![[...]] 的文件名列表。 */
+export async function saveAttachments(
+  app: App,
+  settings: Scan2mdSettings,
+  images: ArrayBuffer[],
+  imageExt: string,
+  baseName: string
+): Promise<string[]> {
+  const attFolder = normalizePath(settings.attachmentFolder || settings.outputFolder || "/");
+  await ensureFolder(app, attFolder);
+  const names: string[] = [];
+  for (let i = 0; i < images.length; i++) {
+    const imgName = `${baseName} - ${i + 1}.${imageExt}`;
+    const imgPath = uniquePath(app, normalizePath(`${attFolder}/${imgName}`));
+    await app.vault.createBinary(imgPath, images[i]);
+    // uniquePath 可能加 " (n)" 后缀，链接要用实际落盘的文件名
+    names.push(imgPath.slice(imgPath.lastIndexOf("/") + 1));
+  }
+  return names;
+}
+
+/** 时间戳附件名前缀，如 scan2md-20260629-143052。 */
+function timestampBase(): string {
+  const d = new Date();
+  const p = (n: number) => String(n).padStart(2, "0");
+  return (
+    `scan2md-${d.getFullYear()}${p(d.getMonth() + 1)}${p(d.getDate())}` +
+    `-${p(d.getHours())}${p(d.getMinutes())}${p(d.getSeconds())}`
+  );
+}
+
+/**
+ * 不识别、直接把拍摄的图片存为附件，并在当前笔记光标处插入 ![[...]] 嵌入链接。
+ * 返回笔记路径。
+ */
+export async function insertImagesIntoActiveNote(
+  app: App,
+  settings: Scan2mdSettings,
+  images: ArrayBuffer[],
+  imageExt: string
+): Promise<string> {
+  const { view, editor, cursor } = getActiveEditor(app);
+  const names = await saveAttachments(app, settings, images, imageExt, timestampBase());
+  const links = names.map((n) => `![[${n}]]`).join("\n");
+  const before = editor.getRange({ line: cursor.line, ch: 0 }, cursor);
+  const prefix = before.trim().length > 0 ? "\n\n" : "\n";
+  insertAtCursor(editor, cursor, prefix + links + "\n");
+  return view.file!.path;
 }
 
 /** 把识别出的 Markdown 写成笔记，并把图片作为附件引用到笔记顶部。返回笔记路径。 */
@@ -91,17 +155,12 @@ export async function saveScan(
       : sanitize((settings.titleTemplate || "Scan {{DATE}}").replace(/\{\{DATE\}\}/g, ts));
 
   let body = input.markdown;
-  if (settings.attachImages && input.images.length) {
-    const attFolder = normalizePath(settings.attachmentFolder || folder);
-    await ensureFolder(app, attFolder);
-    const links: string[] = [];
-    for (let i = 0; i < input.images.length; i++) {
-      const imgName = `${base} - ${i + 1}.${input.imageExt}`;
-      const imgPath = uniquePath(app, normalizePath(`${attFolder}/${imgName}`));
-      await app.vault.createBinary(imgPath, input.images[i]);
-      links.push(`![[${imgName}]]`);
-    }
-    body = `${links.join("\n")}\n\n${input.markdown}`;
+  if ((settings.attachImages || input.forceAttach) && input.images.length) {
+    const names = await saveAttachments(app, settings, input.images, input.imageExt, base);
+    const links = names.map((n) => `![[${n}]]`).join("\n");
+    body = input.markdown.trim()
+      ? `${links}\n\n${input.markdown}`
+      : links;
   }
 
   const frontmatter = `---\ncreated: ${input.createdAt}\nsource: scan2md\n---\n\n`;

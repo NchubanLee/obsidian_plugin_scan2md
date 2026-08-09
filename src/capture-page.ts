@@ -13,7 +13,8 @@ export function renderCapturePage(opts: {
   const initialStatus = isInsert
     ? "已就绪。把书本对准摄像头，可连续拍多页；拍完点「识别并插入」，内容会写入电脑端【当前笔记】的当前光标处。"
     : "准备就绪。把书本对准摄像头，可连续拍多页。";
-  const sendLabel = isInsert ? "识别并插入" : "生成笔记";
+  const sendLabel = isInsert ? "识别并插入" : "识别并生成笔记";
+  const rawLabel = isInsert ? "直接插入图片" : "直接存图成笔记";
   // token 是 hex（crypto.randomBytes），可安全内联
   return `<!doctype html>
 <html lang="zh-CN">
@@ -55,12 +56,13 @@ export function renderCapturePage(opts: {
 </div>
 <div id="fileWrap">
   <label class="big alt">📷 从相册 / 拍照选择
-    <input id="file" type="file" accept="image/*" capture="environment">
+    <input id="file" type="file" accept="image/*">
   </label>
 </div>
 <div id="thumbs"></div>
 <div class="actions">
   <button id="send" class="primary big">${sendLabel}</button>
+  <button id="sendRaw" class="alt big" style="margin-top:8px">${rawLabel}（不识别）</button>
   <button id="clear" class="ghost">清空已拍</button>
 </div>
 <script>
@@ -69,6 +71,7 @@ var MAXW = ${opts.maxWidth};
 var Q = ${opts.quality};
 var MODE = "${opts.mode}";
 var SEND_LABEL = "${sendLabel}";
+var RAW_LABEL = "${rawLabel}";
 var queue = [];
 var video = null;
 var stream = null;
@@ -82,13 +85,17 @@ window.addEventListener("DOMContentLoaded", function(){
   startCam();
   $("cap").onclick = capture;
   $("file").onchange = function(){ onFile(this); };
-  $("send").onclick = upload;
+  $("send").onclick = function(){ upload(false); };
+  $("sendRaw").onclick = function(){ upload(true); };
   $("clear").onclick = function(){ queue = []; renderThumbs(); setStatus("已清空。"); };
 });
 
 async function startCam(){
-  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia){
-    setStatus("当前浏览器不支持摄像头，请用下方按钮选择图片。");
+  // 局域网 http:// 是非安全上下文，多数手机浏览器会禁用 getUserMedia；
+  // 此时直接隐藏页面内拍照区，只保留可用的系统相机/相册入口，避免出现"点了没反应"的死按钮。
+  if (!window.isSecureContext || !navigator.mediaDevices || !navigator.mediaDevices.getUserMedia){
+    $("camWrap").style.display = "none";
+    setStatus("请用下方按钮拍照或从相册选择图片。");
     return;
   }
   try {
@@ -97,7 +104,8 @@ async function startCam(){
     await video.play();
     setStatus("摄像头已就绪，可拍照。");
   } catch (e) {
-    setStatus("无法访问摄像头（" + (e && e.message ? e.message : e) + "）。请用下方按钮选择图片，或在浏览器里允许此来源使用摄像头。");
+    $("camWrap").style.display = "none";
+    setStatus("无法访问摄像头（" + (e && e.message ? e.message : e) + "）。已切换为系统相机/相册入口，请用下方按钮。");
   }
 }
 
@@ -147,26 +155,30 @@ function renderThumbs(){
   }
 }
 
-async function upload(){
+async function upload(raw){
   if (!queue.length){ setStatus("请先拍摄或选择至少一张图片。"); return; }
   var title = $("title").value.trim();
-  var btn = $("send");
+  var btn = raw ? $("sendRaw") : $("send");
+  var otherBtn = raw ? $("send") : $("sendRaw");
   btn.disabled = true;
-  btn.textContent = "识别中…";
-  setStatus("正在上传 " + queue.length + " 张图片并调用模型识别…");
+  otherBtn.disabled = true;
+  btn.textContent = raw ? "插入中…" : "识别中…";
+  setStatus(raw
+    ? "正在上传 " + queue.length + " 张图片（不识别，直接写入）…"
+    : "正在上传 " + queue.length + " 张图片并调用模型识别…");
   try {
     var images = [];
     for (var i = 0; i < queue.length; i++) images.push(queue[i].b64);
     var resp = await fetch("/api/upload", {
       method: "POST",
       headers: { "content-type": "application/json", "x-scan-token": TOKEN },
-      body: JSON.stringify({ title: title, images: images })
+      body: JSON.stringify({ title: title, images: images, raw: !!raw })
     });
     var data = null;
     try { data = await resp.json(); } catch (e) {}
     if (resp.ok && data && data.ok){
       if (data.mode === "insert"){
-        setStatus("✅ 已插入到当前笔记的光标处");
+        setStatus(raw ? "✅ 图片已插入到当前笔记的光标处" : "✅ 已插入到当前笔记的光标处");
       } else {
         setStatus("✅ 已保存：" + (data.path || "笔记"));
       }
@@ -180,7 +192,8 @@ async function upload(){
     setStatus("❌ 网络错误：" + (e && e.message ? e.message : e));
   } finally {
     btn.disabled = false;
-    btn.textContent = SEND_LABEL;
+    otherBtn.disabled = false;
+    btn.textContent = raw ? (RAW_LABEL + "（不识别）") : SEND_LABEL;
   }
 }
 </script>

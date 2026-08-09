@@ -2,13 +2,18 @@ import * as http from "http";
 import type Scan2mdPlugin from "./main";
 import { renderCapturePage } from "./capture-page";
 import { convertImages } from "./converter";
-import { insertIntoActiveNote, saveScan } from "./vault-writer";
+import {
+  insertImagesIntoActiveNote,
+  insertIntoActiveNote,
+  saveScan,
+} from "./vault-writer";
 
 /**
  * 本地 HTTP 服务器（Node http 模块）。
  * - GET /        手机拍照网页
  * - GET /health  存活检查
- * - POST /api/upload  接收 {title?, images:[base64...]}，转 Markdown 并写入 Vault
+ * - POST /api/upload  接收 {title?, images:[base64...], raw?}，转 Markdown 并写入 Vault；
+ *   raw=true 时跳过识别，直接把图片作为附件写入。
  *   上传需带 x-scan-token 头（与启动时生成的 token 一致）。
  */
 export class CaptureServer {
@@ -123,6 +128,47 @@ export class CaptureServer {
       return;
     }
 
+    const settings = this.plugin.settings;
+    const raw = payload?.raw === true;
+
+    // raw 模式：不识别（不需要 API key），图片直接作为附件写入
+    if (raw) {
+      const images: ArrayBuffer[] = [];
+      for (const b64 of images64) {
+        const buf = Buffer.from(b64, "base64");
+        images.push(buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength));
+      }
+      try {
+        if (settings.writeMode === "insert") {
+          const path = await insertImagesIntoActiveNote(
+            this.plugin.app,
+            settings,
+            images,
+            "jpg"
+          );
+          this.send(res, 200, "application/json", JSON.stringify({ ok: true, mode: "insert", path }));
+        } else {
+          const notePath = await saveScan(this.plugin.app, settings, {
+            markdown: "",
+            images,
+            imageExt: "jpg",
+            title: payload?.title,
+            createdAt: new Date().toISOString(),
+            forceAttach: true,
+          });
+          this.send(res, 200, "application/json", JSON.stringify({ ok: true, mode: "newNote", path: notePath }));
+        }
+      } catch (e: any) {
+        this.send(
+          res,
+          400,
+          "application/json",
+          JSON.stringify({ error: e?.message || e })
+        );
+      }
+      return;
+    }
+
     // base64 → InputImage（喂模型用）；图片 ArrayBuffer 仅在「新建笔记」模式才需要
     const inputImages = [];
     for (const b64 of images64) {
@@ -141,8 +187,6 @@ export class CaptureServer {
       );
       return;
     }
-
-    const settings = this.plugin.settings;
 
     // 写入方式：插入当前笔记光标处（不附图、不新建笔记）
     if (settings.writeMode === "insert") {
