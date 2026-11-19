@@ -9,6 +9,7 @@
     "typecheck": "tsc -noEmit -skipLibCheck"
   },
   "dependencies": {
+    "jpeg-js": "^0.4.4",
     "qrcode-generator": "^1.4.4"
   },
   "devDependencies": {

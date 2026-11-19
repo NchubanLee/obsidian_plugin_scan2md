@@ -8,6 +8,7 @@ export function renderCapturePage(opts: {
   maxWidth: number;
   quality: number;
   mode: "insert" | "newNote";
+  autoLegend: boolean;
 }): string {
   const isInsert = opts.mode === "insert";
   const initialStatus = isInsert
@@ -33,6 +34,7 @@ export function renderCapturePage(opts: {
   .thumb{position:relative;display:inline-block;margin:6px 6px 0 0}
   .thumb img{width:84px;height:84px;object-fit:cover;border-radius:8px}
   .thumb .del{position:absolute;top:-6px;right:-6px;width:22px;height:22px;border-radius:50%;border:0;background:#e53935;color:#fff;font-size:14px;line-height:20px;padding:0}
+  .thumb .legend-badge{position:absolute;bottom:-4px;left:-4px;background:#f59e0b;color:#111;font-size:10px;line-height:16px;padding:0 4px;border-radius:8px;font-weight:700}
   button{cursor:pointer;border:0;border-radius:10px;font-size:16px;padding:12px 16px}
   .big{width:100%;font-size:18px;padding:14px}
   #cap{background:#3b82f6;color:#fff;margin-top:8px}
@@ -75,7 +77,11 @@ export function renderCapturePage(opts: {
   </label>
 </div>
 <div id="thumbs"></div>
-<div class="hint">点缩略图可编辑图片（旋转 / 明暗 / 对比度 / 裁切）</div>
+<div class="hint">点缩略图可编辑图片（旋转 / 明暗 / 对比度 / 裁切）</div>${
+    opts.autoLegend
+      ? '<div class="hint">已开启「AI 自动识别图例」：识别时会自动定位图示/图表并附到笔记末尾；也可手动「设为图例」。</div>'
+      : ""
+  }
 <div class="actions">
   <button id="send" class="primary big">${sendLabel}</button>
   <button id="sendRaw" class="alt big" style="margin-top:8px">${rawLabel}（不识别）</button>
@@ -91,6 +97,9 @@ export function renderCapturePage(opts: {
     <div class="editRow">
       <button id="eRotate" class="alt">↻ 旋转90°</button>
       <button id="eCrop" class="alt">✂ 裁切</button>
+    </div>
+    <div class="editRow">
+      <button id="eLegend" class="alt">▣ 设为图例（示意图/图表区域）</button>
     </div>
     <div class="editRow">
       <button id="eSave" class="primary">保存</button>
@@ -184,6 +193,12 @@ function renderThumbs(){
       del.textContent = "×";
       del.onclick = function(){ queue.splice(idx, 1); renderThumbs(); };
       wrap.appendChild(img);
+      if (queue[idx].legend){
+        var badge = document.createElement("span");
+        badge.className = "legend-badge";
+        badge.textContent = "图例";
+        wrap.appendChild(badge);
+      }
       wrap.appendChild(del);
       box.appendChild(wrap);
     })(i);
@@ -194,7 +209,9 @@ function renderThumbs(){
 var editIdx = -1;
 var editBase = null;   // 当前编辑基准（canvas，旋转/裁切会替换它）
 var editBright = 100, editContrast = 100;
-var cropMode = false, cropStart = null, cropRect = null;
+// selMode: "crop"=把选中区域裁切成整图；"legend"=把选中区域另存为图例；null=普通调整
+var selMode = null;
+var cropStart = null, cropRect = null;
 // 裁切框拖拽方式：new=新框选；move=整体移动；n/s/e/w/ne/nw/se/sw=拉边/角微调
 var dragMode = null, dragAnchor = null;
 // 老 Safari 的 2d context 不支持 ctx.filter，预览降级、保存时用逐像素算法兜底
@@ -205,7 +222,8 @@ var FILTER_OK = (function(){
 
 function initEditor(){
   $("eRotate").onclick = rotateEdit;
-  $("eCrop").onclick = toggleCrop;
+  $("eCrop").onclick = function(){ toggleSelect("crop"); };
+  $("eLegend").onclick = function(){ toggleSelect("legend"); };
   $("eSave").onclick = saveEdit;
   $("eCancel").onclick = closeEdit;
   $("eClose").onclick = closeEdit;
@@ -221,10 +239,11 @@ function initEditor(){
 function openEdit(idx){
   editIdx = idx;
   editBright = 100; editContrast = 100;
-  cropMode = false; cropStart = null; cropRect = null;
+  selMode = null; cropStart = null; cropRect = null;
   $("eBright").value = "100"; $("eContrast").value = "100";
   $("eBrightV").textContent = "100%"; $("eContrastV").textContent = "100%";
   $("eCrop").textContent = "✂ 裁切";
+  $("eLegend").textContent = "▣ 设为图例（示意图/图表区域）";
   $("editHint").textContent = "调整图片后点「保存」；明暗/对比度即时预览。";
   var img = new Image();
   img.onload = function(){
@@ -242,7 +261,7 @@ function openEdit(idx){
 function closeEdit(){
   $("editModal").className = "modal";
   $("editCanvas").style.touchAction = "pan-y";
-  editBase = null; editIdx = -1; cropMode = false; cropRect = null; dragMode = null;
+  editBase = null; editIdx = -1; selMode = null; cropRect = null; dragMode = null;
 }
 
 function drawEdit(){
@@ -290,31 +309,47 @@ function rotateEdit(){
   drawEdit();
 }
 
-function toggleCrop(){
+function toggleSelect(mode){
   if (!editBase) return;
-  if (!cropMode){
-    cropMode = true; // 保留已有裁切框，进入后可继续拖动/微调
-    $("editCanvas").style.touchAction = "none"; // 裁切拖拽期间禁止页面滚动
-    $("eCrop").textContent = "✓ 应用裁切";
-    $("editHint").textContent = "空白处拖动重新框选；拖框内整体移动；拖四角/边微调大小。完成后点「✓ 应用裁切」。";
-    drawEdit();
+  if (selMode === mode){
+    applySelection(mode);
   } else {
-    if (cropRect && cropRect.w > 10 && cropRect.h > 10){
-      var c = document.createElement("canvas");
-      c.width = Math.round(cropRect.w); c.height = Math.round(cropRect.h);
-      c.getContext("2d").drawImage(
-        editBase,
-        cropRect.x, cropRect.y, cropRect.w, cropRect.h,
-        0, 0, c.width, c.height
-      );
-      editBase = c;
-    }
-    cropMode = false; cropRect = null; dragMode = null;
-    $("editCanvas").style.touchAction = "pan-y";
-    $("eCrop").textContent = "✂ 裁切";
-    $("editHint").textContent = "调整图片后点「保存」；明暗/对比度即时预览。";
+    selMode = mode; // 进入选择模式；已有框则保留，可继续拖动/微调
+    $("editCanvas").style.touchAction = "none"; // 拖拽期间禁止页面滚动
+    $("eCrop").textContent = mode === "crop" ? "✓ 应用裁切" : "✂ 裁切";
+    $("eLegend").textContent = mode === "legend" ? "✓ 保存图例" : "▣ 设为图例（示意图/图表区域）";
+    $("editHint").textContent = mode === "crop"
+      ? "空白处拖动重新框选；拖框内整体移动；拖四角/边微调大小。完成后点「✓ 应用裁切」。"
+      : "框选出要作为图例的示意图/图表区域（不改变整图），完成后点「✓ 保存图例」。";
     drawEdit();
   }
+}
+
+/** 把当前框选区域应用到目标：crop=替换整图；legend=另存为图例（附在当前图片上）。 */
+function applySelection(mode){
+  if (cropRect && cropRect.w > 10 && cropRect.h > 10){
+    var c = document.createElement("canvas");
+    c.width = Math.round(cropRect.w); c.height = Math.round(cropRect.h);
+    c.getContext("2d").drawImage(
+      editBase,
+      cropRect.x, cropRect.y, cropRect.w, cropRect.h,
+      0, 0, c.width, c.height
+    );
+    if (mode === "crop"){
+      editBase = c; // 整图被替换为裁切结果，明暗/对比度仍在「保存」时烘焙
+    } else {
+      // 图例：所见即所得，把当前明暗/对比度烘焙进图例并挂到该张图片上
+      bakeFilters(c);
+      queue[editIdx].legend = c.toDataURL("image/jpeg", Q);
+    }
+  }
+  selMode = null; cropRect = null; dragMode = null;
+  $("editCanvas").style.touchAction = "pan-y";
+  $("eCrop").textContent = "✂ 裁切";
+  $("eLegend").textContent = "▣ 设为图例（示意图/图表区域）";
+  $("editHint").textContent = "调整图片后点「保存」；明暗/对比度即时预览。";
+  drawEdit();
+  renderThumbs();
 }
 
 function canvasPos(e){
@@ -353,7 +388,7 @@ function hitCrop(p){
 }
 
 function cropDown(e){
-  if (!cropMode || !editBase) return;
+  if (!selMode || !editBase) return;
   e.preventDefault();
   var p = canvasPos(e);
   dragMode = hitCrop(p);
@@ -372,7 +407,7 @@ function cropDown(e){
 }
 
 function cropMove(e){
-  if (!cropMode || !dragMode) return;
+  if (!selMode || !dragMode) return;
   e.preventDefault();
   var p = canvasPos(e);
   if (dragMode === "new"){
@@ -403,14 +438,10 @@ function cropUp(){
   dragMode = null;
 }
 
-function saveEdit(){
-  if (!editBase) { closeEdit(); return; }
-  var c = document.createElement("canvas");
-  c.width = editBase.width; c.height = editBase.height;
-  var ctx = c.getContext("2d");
-  ctx.drawImage(editBase, 0, 0);
+/** 把明暗/对比度逐像素烘焙进画布（兼容不支持 ctx.filter 的浏览器），返回该画布。 */
+function bakeFilters(c){
   if (editBright !== 100 || editContrast !== 100){
-    // 逐像素烘焙明暗/对比度，兼容不支持 ctx.filter 的浏览器
+    var ctx = c.getContext("2d");
     var d = ctx.getImageData(0, 0, c.width, c.height), p = d.data;
     var b = (editBright - 100) * 1.27;          // 30~200% → 约 -89~+127
     var k = editContrast / 100;                  // 对比度系数
@@ -422,8 +453,17 @@ function saveEdit(){
     }
     ctx.putImageData(d, 0, 0);
   }
+  return c;
+}
+
+function saveEdit(){
+  if (!editBase) { closeEdit(); return; }
+  var c = document.createElement("canvas");
+  c.width = editBase.width; c.height = editBase.height;
+  c.getContext("2d").drawImage(editBase, 0, 0);
+  bakeFilters(c);
   var dataUrl = c.toDataURL("image/jpeg", Q);
-  queue[editIdx] = { b64: String(dataUrl).split(",")[1], dataUrl: dataUrl };
+  queue[editIdx] = { b64: String(dataUrl).split(",")[1], dataUrl: dataUrl, legend: queue[editIdx].legend };
   var n = editIdx + 1;
   closeEdit();
   renderThumbs();
@@ -444,11 +484,15 @@ async function upload(raw){
     : "正在上传 " + queue.length + " 张图片并调用模型识别…");
   try {
     var images = [];
-    for (var i = 0; i < queue.length; i++) images.push(queue[i].b64);
+    var legends = [];
+    for (var i = 0; i < queue.length; i++){
+      images.push(queue[i].b64);
+      legends.push(queue[i].legend ? String(queue[i].legend).split(",")[1] : "");
+    }
     var resp = await fetch("/api/upload", {
       method: "POST",
       headers: { "content-type": "application/json", "x-scan-token": TOKEN },
-      body: JSON.stringify({ title: title, images: images, raw: !!raw })
+      body: JSON.stringify({ title: title, images: images, legends: legends, raw: !!raw })
     });
     var data = null;
     try { data = await resp.json(); } catch (e) {}

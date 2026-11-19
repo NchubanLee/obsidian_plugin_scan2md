@@ -8,3 +8,9 @@ data.json
 
 # Claude Code 本地配置，不提交
 .claude/
+
+# 本机用 pnpm 构建时生成的锁文件（本仓库用 npm/package-lock.json）
+pnpm-lock.yaml
+
+# 本地打包产物（发布由 .github/workflows/release.yml 自动完成）
+release/

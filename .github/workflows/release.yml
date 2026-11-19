@@ -30,6 +30,6 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           tag="${GITHUB_REF#refs/tags/}"
-          zip -r "scan2md-${tag}.zip" main.js manifest.json styles.css
-          gh release create "$tag" main.js manifest.json styles.css "scan2md-${tag}.zip" \
-            --title "scan2md ${tag}" --generate-notes
+          zip -r "scan-to-markdown-ai-${tag}.zip" main.js manifest.json styles.css
+          gh release create "$tag" main.js manifest.json styles.css "scan-to-markdown-ai-${tag}.zip" \
+            --title "scan-to-markdown-ai ${tag}" --generate-notes

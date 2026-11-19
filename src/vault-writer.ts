@@ -118,6 +118,29 @@ function timestampBase(): string {
 }
 
 /**
+ * 把手机端框选的「图例」区域（示意图/图表）存为附件，并追加到 Markdown 末尾。
+ * 不改变识别出的正文，图例链接始终排在输出最后。
+ */
+export async function appendLegendImages(
+  app: App,
+  settings: Scan2mdSettings,
+  markdown: string,
+  legends: ArrayBuffer[]
+): Promise<string> {
+  if (!legends.length) return markdown;
+  const names = await saveAttachments(
+    app,
+    settings,
+    legends,
+    "jpg",
+    `${timestampBase()}-legend`
+  );
+  const links = names.map((n) => `![[${n}]]`).join("\n");
+  const body = markdown.trimEnd();
+  return (body ? body + "\n\n" : "") + links + "\n";
+}
+
+/**
  * 不识别、直接把拍摄的图片存为附件，并在当前笔记光标处插入 ![[...]] 嵌入链接。
  * 返回笔记路径。
  */

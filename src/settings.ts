@@ -22,6 +22,10 @@ export interface Scan2mdSettings {
   jpegQuality: number; // 0~1
   attachImages: boolean;
   openAfterSave: boolean;
+  /** AI 自动定位图例区域（图 + 图注）。 */
+  autoDetectLegends: boolean;
+  /** 图例拉正 + 锐化。 */
+  enhanceLegends: boolean;
 }
 
 export const DEFAULT_SETTINGS: Scan2mdSettings = {
@@ -39,6 +43,8 @@ export const DEFAULT_SETTINGS: Scan2mdSettings = {
   jpegQuality: 0.8,
   attachImages: true,
   openAfterSave: true,
+  autoDetectLegends: true,
+  enhanceLegends: true,
 };
 
 export class Scan2mdSettingTab extends PluginSettingTab {
@@ -230,6 +236,30 @@ export class Scan2mdSettingTab extends PluginSettingTab {
       .addToggle((tg) =>
         tg.setValue(s.attachImages).onChange(async (v) => {
           s.attachImages = v;
+          await this.plugin.saveSettings();
+        })
+      );
+
+    new Setting(containerEl).setName("图例（示意图/图表）").setHeading();
+
+    new Setting(containerEl)
+      .setName("AI 自动识别图例")
+      .setDesc(
+        "识别正文后，额外调用一次模型自动定位书里的插图/图表（含下方图注）并裁剪为图例，追加到笔记末尾。会增加一次模型调用（耗时与 token）；手机端「设为图例」仍可手动补充。"
+      )
+      .addToggle((tg) =>
+        tg.setValue(s.autoDetectLegends).onChange(async (v) => {
+          s.autoDetectLegends = v;
+          await this.plugin.saveSettings();
+        })
+      );
+
+    new Setting(containerEl)
+      .setName("图例增强（拉正 + 锐化）")
+      .setDesc("对裁出的图例截图自动校正倾斜角度并锐化，更接近扫描件效果；整页保持原样。")
+      .addToggle((tg) =>
+        tg.setValue(s.enhanceLegends).onChange(async (v) => {
+          s.enhanceLegends = v;
           await this.plugin.saveSettings();
         })
       );

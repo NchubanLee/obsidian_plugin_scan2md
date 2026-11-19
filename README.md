@@ -1,4 +1,6 @@
-# Scan to Markdown
+# Scan to Markdown AI
+
+> 基于 [swift/scan2md](https://github.com/bwtymdb) 修改的增强版：在原作者基础上新增「AI 自动识别图例（自动拉正+锐化）」「OCR 去图注」等能力。
 
 > **English**: Scan book pages, formulas, and tables with your phone; a vision LLM converts them into structured Markdown written directly into your Obsidian notes (cursor position or new note). Desktop only. Supports Claude / Gemini / OpenAI / Qwen / GLM / Doubao / Kimi / ERNIE / Hunyuan. Your API key stays local; photos are sent only to your chosen LLM provider; no telemetry.
 
@@ -17,6 +19,9 @@
   - **识别后插入**：调视觉大模型转成 Markdown 再写入。
   - **直接插入图片（不识别）**：跳过模型识别（不需要 API Key、零 token 消耗），原图存为附件并在光标处/新笔记里用 `![[...]]` 嵌入。
 - **拍前可修图**：点缩略图即可对图片做旋转、明暗、对比度、裁切等基础调整，保存后再上传（识别和直接插图两种模式都生效）。裁切框支持整体拖动、拖边/角微调。
+- **图例/插图区域**：在修图界面点「设为图例」框选出书里的示意图/图表区域，识别完成后该区域会以截图形式存为附件，并自动追加到输出 Markdown 的**最末尾**（用 `![[...]]` 引用），适合保留模型复现不出来的图表。
+- **AI 自动定位图例**：可开启——识别正文后自动再用视觉模型定位书里的插图/图表（含下方图注）并裁剪，无需手动框选（会增加一次模型调用）。
+- **图例扫描增强**：对图例截图自动拉正倾斜角度并锐化，更接近扫描件效果（整页保持原样）。
 - **两种写入方式**：
   - **插入当前笔记光标处**（默认）：识别结果直接写到当前打开笔记的当前光标位置，纯 Markdown、不附图。
   - **新建独立笔记**：每次生成一个独立笔记，可附带原图存档。

@@ -1,8 +1,16 @@
 import * as http from "http";
 import type Scan2mdPlugin from "./main";
 import { renderCapturePage } from "./capture-page";
-import { convertImages } from "./converter";
+import { convertImages, detectFigureBoxes, type FigureBox } from "./converter";
 import {
+  crop,
+  decodeJpeg,
+  encodeJpeg,
+  enhance,
+  type PixelImage,
+} from "./image-process";
+import {
+  appendLegendImages,
   insertImagesIntoActiveNote,
   insertIntoActiveNote,
   saveScan,
@@ -69,6 +77,7 @@ export class CaptureServer {
           maxWidth: this.plugin.settings.maxImageWidth,
           quality: this.plugin.settings.jpegQuality,
           mode: this.plugin.settings.writeMode,
+          autoLegend: this.plugin.settings.autoDetectLegends,
         });
         this.send(res, 200, "text/html; charset=utf-8", html);
         return;
@@ -186,6 +195,85 @@ export class CaptureServer {
         JSON.stringify({ error: "识别失败：" + (e?.message || e) })
       );
       return;
+    }
+
+    // 图例：手动（手机端框选）+ 自动（AI 定位图+图注）统一收集，可做拉正/锐化后追加到 Markdown 末尾
+    const legendBuffers: ArrayBuffer[] = [];
+
+    // 手动图例（手机端「设为图例」）
+    const manual64: string[] = Array.isArray(payload?.legends)
+      ? (payload.legends as unknown[]).filter(
+          (x): x is string => typeof x === "string" && x.length > 0
+        )
+      : [];
+    for (const b64 of manual64) {
+      const buf = Buffer.from(b64, "base64");
+      legendBuffers.push(buf.buffer.slice(buf.byteOffset, buf.byteOffset + buf.byteLength));
+    }
+
+    // 自动图例：AI 逐页定位「插图/图表 + 图注」并裁剪（单页失败不阻断识别）
+    if (settings.autoDetectLegends) {
+      for (const b64 of images64) {
+        let boxes: FigureBox[];
+        try {
+          boxes = await detectFigureBoxes(settings, { b64, mediaType: "image/jpeg" });
+        } catch {
+          continue;
+        }
+        if (!boxes.length) continue;
+        let page: PixelImage;
+        try {
+          page = decodeJpeg(Buffer.from(b64, "base64"));
+        } catch {
+          continue;
+        }
+        const margin = Math.round(Math.min(page.width, page.height) * 0.01);
+        for (const box of boxes) {
+          try {
+            const x = box.x1 * page.width;
+            const y = box.y1 * page.height;
+            const w = (box.x2 - box.x1) * page.width;
+            const h = (box.y2 - box.y1) * page.height;
+            const region = crop(
+              page,
+              Math.max(0, x - margin),
+              Math.max(0, y - margin),
+              Math.min(page.width, w + margin * 2),
+              Math.min(page.height, h + margin * 2)
+            );
+            legendBuffers.push(encodeJpeg(region));
+          } catch {
+            continue;
+          }
+        }
+      }
+    }
+
+    // 图例增强：拉正角度 + 锐化（失败则保留原图）
+    if (settings.enhanceLegends && legendBuffers.length) {
+      for (let i = 0; i < legendBuffers.length; i++) {
+        try {
+          const img = decodeJpeg(Buffer.from(legendBuffers[i]));
+          const out = enhance(img);
+          legendBuffers[i] = encodeJpeg(out);
+        } catch {
+          // 保留原图
+        }
+      }
+    }
+
+    if (legendBuffers.length) {
+      try {
+        markdown = await appendLegendImages(this.plugin.app, settings, markdown, legendBuffers);
+      } catch (e: any) {
+        this.send(
+          res,
+          500,
+          "application/json",
+          JSON.stringify({ error: "图例保存失败：" + (e?.message || e) })
+        );
+        return;
+      }
     }
 
     // 写入方式：插入当前笔记光标处（不附图、不新建笔记）
